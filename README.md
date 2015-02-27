@@ -16,9 +16,13 @@ Please consult [gem5's documentation] for more.
 
 ## How to Use
 
+An script called hypervisor.py is added to configs/example.
+You may use it like other gem5's configuration scripts.
+Description of the arguments are given in "hypervisor.py -h".
+
 ## Contact
 
-If you have any question about this project, please don't hesitate to contact me: nikoonia at sign ut dot ac do ir
+If you have any question about this project, please don't hesitate to contact me: nikoonia at sign ut dot ac dot ir
 
 [gem5's documentation]: http://www.gem5.org/Documentation
 
