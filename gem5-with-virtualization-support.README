@@ -1,0 +1,61 @@
+INTRO--------------------------------------------------------------------------------------------------
+
+This is a modified gem5 that simulate the behavior of a hypervisor and can simulate multiple virtual machines. It has several features like vCPU, pipelined O3 CPU and ease of configuration using command line arguments -- the usual style in gem5.
+
+BUILD---------------------------------------------------------------------------------------------------
+
+scons build/ALPHA/gem5.fast PROTOCOL=MOESI_CMP_token
+
+QUICK START----------------------------------------------------------------------------------------------
+
+For 2 VMs, with 512MB RAM and a dedicated core for each VM:
+
+./build/ALPHA/gem5.fast configs/example/hypervisor.py --kernel=alpha-vmlinux_2.6.27-gcc_4.3.4 --disk-image=linux-parsec-2-1-m5-with-test-inputs.img  --topology=Mesh --vm-cpu-placements="1-0:0-1" --vm-mem-sizes="512MB:512MB" --mesh-rows=1 --l2cache --l2_size="2MB" --num-l2caches=1 --num-dirs=1 --vm-scripts="prog1.rcS:prog2.rcS"
+
+For 2 VMs, with 512MB RAM and half of a core for each VM (here VMs become scheduled on that core based on shared that has been specified):
+
+./build/ALPHA/gem5.fast configs/example/hypervisor.py --kernel=alpha-vmlinux_2.6.27-gcc_4.3.4 --disk-image=linux-parsec-2-1-m5-with-test-inputs.img  --topology=Mesh --vm-cpu-placements="0.5:0.5" --vm-mem-sizes="512MB:512MB" --mesh-rows=1 --l2cache --l2_size="2MB" --num-l2caches=1 --num-dirs=1 --vm-scripts=":"
+
+NOTE: Since we didn't specified --vm-scripts, you will get terminal.
+
+MORE-----------------------------------------------------------------------------------------------------
+
+In this section, we briefly describe features that our modification provides.
+Just like any hypervisor, number of CPUs and the amount of dedicated RAM could be defined.
+User has control over assignment of processors to a VM in the interconnection network (e.g. Mesh).
+
+VMs run in FS mode and any number of them could be defined.
+Each VM have its own kernel and disk image.
+They can run their own application(s) (the .rcS script). If not set, a bash will be fired up.
+
+Terminal of each VM can be accessed using m5term or telnet (the usual method in gem5).
+Like original gem5, our version supports out-of-order and pipelined CPU, different ISAs, cache coherency protocols and interconnection networks.
+
+It supports vCPU: physical processors can be shared between VMs.
+VMs share processing power in a weighted round-robin manner.
+The fraction of share is defined by the user.
+The context-switch overhead can also be configured.
+
+It coexist with other features of the simulator.
+It is Open-source and can be downloaded, used and modified for free.
+We would like to submit it to the review board of gem5 so it could be part of mainline.
+
+
+Limitations--------------------------------------------------------------------------------------------
+
+Some of the limitations of our current version is described below:
+User cannot specify different kernel binary and disk images for VMs in command-line arguments. This could be implemented easily in configuration script.
+
+We have tested x86 and Alpha and logically other ISAs should also work. For cache coherency protocols and interconnection networks, we have modified MOESI_CMP_token and Mesh, other topologies and coherency protocols can be modified easily.
+
+We do not simulate virtualized I/Os. Each VM has its own I/Os. (like Intel-VT's direct I/O)
+We do not support load balancing: when vCPU is configured, if a VM is suspended in its allocated periods (e.g. waiting for I/O), its unused shares will not be allocated to other VMs. However, hypervisors benefits from load balancing.
+Other advanced features like migration is not implemented.
+
+Help---------------------------------------------------------------------------------------------------
+
+./build/ALPHA/gem5.fast configs/example/hypervisor.py --help
+
+Contact------------------------------------------------------------------------------------------------
+
+Seyed Hossein Nikoonia: nikoonia@ut.ac.ir

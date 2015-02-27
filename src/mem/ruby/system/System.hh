@@ -1,0 +1,219 @@
+/*
+ * Copyright (c) 1999-2012 Mark D. Hill and David A. Wood
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met: redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer;
+ * redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution;
+ * neither the name of the copyright holders nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/*
+ * Contains all of the various parts of the system we are simulating.
+ * Performs allocation, deallocation, and setup of all the major
+ * components of the system
+ */
+
+#ifndef __MEM_RUBY_SYSTEM_SYSTEM_HH__
+#define __MEM_RUBY_SYSTEM_SYSTEM_HH__
+
+#include "base/callback.hh"
+#include "mem/packet.hh"
+#include "mem/ruby/common/Global.hh"
+#include "mem/ruby/recorder/CacheRecorder.hh"
+#include "mem/ruby/slicc_interface/AbstractController.hh"
+#include "mem/ruby/system/MemoryVector.hh"
+#include "mem/ruby/system/SparseMemory.hh"
+#include "params/RubySystem.hh"
+#include "sim/clocked_object.hh"
+
+class Network;
+class Profiler;
+class MemoryControl;
+
+#define HYPERVISOR_PAGE_SIZE 4*1024 //4KB as in linux
+#define HYPERVISOR_PAGE_LOW_ORDER_BITS 12 //2^12 = 4K 
+
+class RubySystem : public ClockedObject
+{
+  public:
+    class RubyEvent : public Event
+    {
+      public:
+        RubyEvent(RubySystem* _ruby_system)
+        {
+            ruby_system = _ruby_system;
+        }
+      private:
+        void process();
+
+        RubySystem* ruby_system;
+    };
+
+    friend class RubyEvent;
+
+    typedef RubySystemParams Params;
+    RubySystem(const Params *p);
+    ~RubySystem();
+
+    // config accessors
+    static int getRandomSeed() { return m_random_seed; }
+    static int getRandomization() { return m_randomization; }
+    static int getBlockSizeBytes() { return m_block_size_bytes; }
+    static int getBlockSizeBits() { return m_block_size_bits; }
+    static uint64 getMemorySizeBytes() { return m_memory_size_bytes; }
+    static int getMemorySizeBits() { return m_memory_size_bits; }
+    Cycles getTime() const { return curCycle(); }
+
+    // Public Methods
+    Network*
+    getNetwork()
+    {
+        assert(m_network_ptr != NULL);
+        return m_network_ptr;
+    }
+
+    Profiler*
+    getProfiler()
+    {
+        assert(m_profiler_ptr != NULL);
+        return m_profiler_ptr;
+    }
+
+    MemoryVector*
+    getMemoryVector()
+    {
+        assert(m_mem_vec_ptr != NULL);
+        return m_mem_vec_ptr;
+    }
+
+    void printStats(std::ostream& out);
+    void clearStats() const;
+
+    uint64 getInstructionCount(int thread) { return 1; }
+
+    void print(std::ostream& out) const;
+
+    void serialize(std::ostream &os);
+    void unserialize(Checkpoint *cp, const std::string &section);
+    void process();
+    void startup();
+    bool functionalRead(Packet *ptr, Address realAddress);
+    bool functionalWrite(Packet *ptr, Address realAddress);
+
+    void registerNetwork(Network*);
+    void registerProfiler(Profiler*);
+    void registerAbstractController(AbstractController*);
+    void registerSparseMemory(SparseMemory*);
+    void registerMemController(MemoryControl *mc);
+
+    bool eventQueueEmpty() { return eventq->empty(); }
+    void enqueueRubyEvent(Tick tick)
+    {
+        RubyEvent* e = new RubyEvent(this);
+        schedule(e, tick);
+    }
+
+  private:
+    // Private copy constructor and assignment operator
+    RubySystem(const RubySystem& obj);
+    RubySystem& operator=(const RubySystem& obj);
+
+    void init();
+
+    void readCompressedTrace(std::string filename,
+                             uint8_t *&raw_data,
+                             uint64& uncompressed_trace_size);
+    void writeCompressedTrace(uint8_t *raw_data, std::string file,
+                              uint64 uncompressed_trace_size);
+
+  private:
+    // configuration parameters
+    static int m_random_seed;
+    static bool m_randomization;
+    static int m_block_size_bytes;
+    static int m_block_size_bits;
+    static uint64 m_memory_size_bytes;
+    static int m_memory_size_bits;
+
+	//v
+	static int64* mappedRealToMemory;
+	static int64* mappedMemoryToReal;
+	static int64  lastMappedMemory;
+
+    Network* m_network_ptr;
+    std::vector<MemoryControl *> m_memory_controller_vec;
+    std::vector<AbstractController *> m_abs_cntrl_vec;
+
+  public:
+    Profiler* m_profiler_ptr;
+    MemoryVector* m_mem_vec_ptr;
+    bool m_warmup_enabled;
+    bool m_cooldown_enabled;
+    CacheRecorder* m_cache_recorder;
+    std::vector<SparseMemory*> m_sparse_memory_vector;
+
+	Addr mapRealAddressToMemory(Addr realAddress)
+	{
+		//printf("we are in and last mapped memory is %d\n", (int)lastMappedMemory);
+		if(mappedRealToMemory[realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] == -1)
+		{
+			mappedRealToMemory[realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] = lastMappedMemory;
+			mappedMemoryToReal[lastMappedMemory] = realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS;
+			lastMappedMemory++;
+			//printf("XXX %d, mapped to %d\n", (int)(realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS), (int)lastMappedMemory);
+		}
+		return Addr((mappedRealToMemory[realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] << HYPERVISOR_PAGE_LOW_ORDER_BITS) | (realAddress & (HYPERVISOR_PAGE_SIZE-1) ));
+	}
+	Addr mapMemoryToRealAddress(Addr memoryAddress)
+	{
+		assert(memoryAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS < lastMappedMemory);
+		return Addr((mappedMemoryToReal[memoryAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] << HYPERVISOR_PAGE_LOW_ORDER_BITS) | (memoryAddress & (HYPERVISOR_PAGE_SIZE-1) )); 
+	}
+};
+
+inline std::ostream&
+operator<<(std::ostream& out, const RubySystem& obj)
+{
+    //obj.print(out);
+    out << std::flush;
+    return out;
+}
+
+class RubyExitCallback : public Callback
+{
+  private:
+    std::string stats_filename;
+    RubySystem *ruby_system;
+
+  public:
+    virtual ~RubyExitCallback() {}
+
+    RubyExitCallback(const std::string& _stats_filename, RubySystem *system)
+    {
+        stats_filename = _stats_filename;
+        ruby_system = system;
+    }
+
+    void process();
+};
+
+#endif // __MEM_RUBY_SYSTEM_SYSTEM_HH__
