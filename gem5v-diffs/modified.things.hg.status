@@ -1,0 +1,16 @@
+M configs/common/Options.py
+M configs/common/SysPaths.py
+M configs/ruby/MOESI_CMP_token.py
+M configs/ruby/Ruby.py
+M configs/topologies/Mesh.py
+M src/mem/ruby/system/RubyPort.cc
+M src/mem/ruby/system/RubyPort.hh
+M src/mem/ruby/system/Sequencer.py
+M src/mem/ruby/system/System.cc
+M src/mem/ruby/system/System.hh
+M src/python/m5/SimObject.py
+M src/sim/ClockedObject.py
+M src/sim/clocked_object.hh
+? configs/example/hypervisor.py
+? src/mem/ruby/system/System.hh.orig
+? src/sim/clocked_object.hh.orig

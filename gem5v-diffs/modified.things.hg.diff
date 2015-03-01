@@ -1,0 +1,791 @@
+diff -r c1b28ea22ff8 configs/common/Options.py
+--- a/configs/common/Options.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/configs/common/Options.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -248,3 +248,16 @@
+     # Disk Image Options
+     parser.add_option("--disk-image", action="store", type="string", default=None,
+                       help="Path to the disk image to use.")
++
++def addVOptions(parser):
++    parser.add_option("--vm-cpu-placements", type="string", default="1-0:0-1",
++                      help="1-0-0.75:0-1-0:0-0-0.25 means create 3 cpus and 3 vms."\
++                      "their share has been specified")
++    parser.add_option("--vm-context-switch-hyperperiod", type="int", default=1000000000000,
++                      help="hyper period of round rubbin when scheduling vms on vcpus. default is 1sec. linux quantum is 100ms")
++    parser.add_option("--vm-context-switch-overhead", type="int",    default=6000000000,
++                      help="the default represents 6ms context switch overhead. 5993.3ns process context switch time in our tests in gem5")
++    parser.add_option("--vm-mem-sizes", type="string", default="128MB:128MB",
++                      help="128MB:256MB:64MB means assign 128MB, 256MB and 64MB to each vm")
++    parser.add_option("--vm-scripts", type="string", default=":",
++                      help="vm1 and vm2 will run s1 and s2 respectively with --vm-scripts=script1:script2")
+diff -r c1b28ea22ff8 configs/common/SysPaths.py
+--- a/configs/common/SysPaths.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/configs/common/SysPaths.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -50,7 +50,7 @@
+         try:
+                 path = env['M5_PATH'].split(':')
+         except KeyError:
+-                path = [ '/dist/m5/system', '/n/poolfs/z/dist/m5/system' ]
++                path = [ '/dist/m5/system', '/n/poolfs/z/dist/m5/system', '/root/system' ]
+ 
+         for system.dir in path:
+             if os.path.isdir(system.dir):
+diff -r c1b28ea22ff8 configs/ruby/MOESI_CMP_token.py
+--- a/configs/ruby/MOESI_CMP_token.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/configs/ruby/MOESI_CMP_token.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -55,6 +55,187 @@
+     parser.add_option("--allow-atomic-migration", action="store_true",
+           help="allow migratory sharing for atomic only accessed blocks")
+     
++def create_vsystem(options, systems, ruby_system, total_num_cpus, total_mem_size, vm_cpus, vm_mems):
++    
++    if buildEnv['PROTOCOL'] != 'MOESI_CMP_token':
++        panic("This script requires the MOESI_CMP_token protocol to be built.")
++
++    #
++    # number of tokens that the owner passes to requests so that shared blocks can
++    # respond to read requests
++    #
++    n_tokens = options.num_cpus + 1
++
++    cpu_sequencers = []
++    
++    #
++    # The ruby network creation expects the list of nodes in the system to be
++    # consistent with the NetDest list.  Therefore the l1 controller nodes must be
++    # listed before the directory nodes and directory nodes before dma nodes, etc.
++    #
++    l1_cntrl_nodes = []
++    l2_cntrl_nodes = []
++    dir_cntrl_nodes = []
++    dma_cntrl_nodes = []
++
++    #
++    # Must create the individual controllers before the network to ensure the
++    # controller constructors are called before the network constructor
++    #
++    l2_bits = int(math.log(options.num_l2caches, 2))
++    block_size_bits = int(math.log(options.cacheline_size, 2))
++    
++    cntrl_count = 0
++
++    start_address = MemorySize("0B")
++
++    for (j, vm) in enumerate(systems):
++        for i in xrange(int(vm_cpus[j])):
++            #
++            # First create the Ruby objects associated with this cpu
++            #
++            l1i_cache = L1Cache(size = options.l1i_size,
++                                assoc = options.l1i_assoc,
++                                start_index_bit = block_size_bits)
++            l1d_cache = L1Cache(size = options.l1d_size,
++                                assoc = options.l1d_assoc,
++                                start_index_bit = block_size_bits)
++
++            l1_cntrl = L1Cache_Controller(version = len(l1_cntrl_nodes),
++                                          cntrl_id = cntrl_count,
++                                          L1Icache = l1i_cache,
++                                          L1Dcache = l1d_cache,
++                                          l2_select_num_bits = l2_bits,
++                                          N_tokens = n_tokens,
++                                          retry_threshold = \
++                                            options.l1_retries,
++                                          fixed_timeout_latency = \
++                                            options.timeout_latency,
++                                          dynamic_timeout_enabled = \
++                                            not options.disable_dyn_timeouts,
++                                          no_mig_atomic = not \
++                                            options.allow_atomic_migration,
++                                          send_evictions = (
++                                              options.cpu_type == "detailed"),
++                                          transitions_per_cycle = options.ports,
++                                          ruby_system = ruby_system)
++
++            cpu_seq = RubySequencer(version = len(l1_cntrl_nodes),
++                                    icache = l1i_cache,
++                                    dcache = l1d_cache,
++                                    ruby_system = ruby_system,
++                                    virtualization_support = True,
++                                    real_address_range = AddrRange(start_address,start_address.value+MemorySize(vm_mems[j]).value))
++
++            l1_cntrl.sequencer = cpu_seq
++
++            if vm.piobus != None:
++                cpu_seq.pio_port = vm.piobus.slave
++
++            exec("ruby_system.l1_cntrl%d = l1_cntrl" % len(l1_cntrl_nodes))
++            #
++            # Add controllers and sequencers to the appropriate lists
++            #
++            cpu_sequencers.append(cpu_seq)
++            l1_cntrl_nodes.append(l1_cntrl)
++
++            cntrl_count += 1
++
++        start_address.value = start_address.value + MemorySize(vm_mems[j]).value
++        #print start_address
++
++    l2_index_start = block_size_bits + l2_bits
++
++    for i in xrange(options.num_l2caches):
++        #
++        # First create the Ruby objects associated with this cpu
++        #
++        l2_cache = L2Cache(size = options.l2_size,
++                           assoc = options.l2_assoc,
++                           start_index_bit = l2_index_start)
++
++        l2_cntrl = L2Cache_Controller(version = i,
++                                      cntrl_id = cntrl_count,
++                                      L2cache = l2_cache,
++                                      N_tokens = n_tokens,
++                                      transitions_per_cycle = options.ports,
++                                      ruby_system = ruby_system)
++        
++        exec("ruby_system.l2_cntrl%d = l2_cntrl" % i)
++        l2_cntrl_nodes.append(l2_cntrl)
++
++        cntrl_count += 1
++
++    #TODO: take care of phys_mem_size
++    phys_mem_size = total_mem_size
++    #assert(phys_mem_size % options.num_dirs == 0)
++    mem_module_size = phys_mem_size / options.num_dirs
++
++    # Run each of the ruby memory controllers at a ratio of the frequency of
++    # the ruby system
++    # clk_divider value is a fix to pass regression.
++    ruby_system.memctrl_clk_domain = DerivedClockDomain(
++                                          clk_domain=ruby_system.clk_domain,
++                                          clk_divider=3)
++
++    for i in xrange(options.num_dirs):
++        #
++        # Create the Ruby objects associated with the directory controller
++        #
++
++        mem_cntrl = RubyMemoryControl(
++                              clk_domain = ruby_system.memctrl_clk_domain,
++                              version = i,
++                              ruby_system = ruby_system)
++
++        dir_size = MemorySize('0B')
++        dir_size.value = mem_module_size
++
++        dir_cntrl = Directory_Controller(version = i,
++                                         cntrl_id = cntrl_count,
++                                         directory = \
++                                         RubyDirectoryMemory(version = i,
++                                             use_map = options.use_map,
++                                             size = dir_size),
++                                         memBuffer = mem_cntrl,
++                                         l2_select_num_bits = l2_bits,
++                                         transitions_per_cycle = options.ports,
++                                         ruby_system = ruby_system)
++
++        exec("ruby_system.dir_cntrl%d = dir_cntrl" % i)
++        dir_cntrl_nodes.append(dir_cntrl)
++
++        cntrl_count += 1
++
++    for (j, vm) in enumerate(systems):
++        for i, dma_port in enumerate(vm._dma_ports):
++            #
++            # Create the Ruby objects associated with the dma controller
++            #
++            dma_seq = DMASequencer(version = len(dma_cntrl_nodes),
++                                   ruby_system = ruby_system)
++        
++            dma_cntrl = DMA_Controller(version = len(dma_cntrl_nodes),
++                                       cntrl_id = cntrl_count,
++                                       dma_sequencer = dma_seq,
++                                       transitions_per_cycle = options.ports,
++                                       ruby_system = ruby_system)
++
++            exec("ruby_system.dma_cntrl%d = dma_cntrl" % len(dma_cntrl_nodes))
++            exec("ruby_system.dma_cntrl%d.dma_sequencer.slave = dma_port" % len(dma_cntrl_nodes))
++            dma_cntrl_nodes.append(dma_cntrl)
++            cntrl_count += 1
++
++    all_cntrls = l1_cntrl_nodes + \
++                 l2_cntrl_nodes + \
++                 dir_cntrl_nodes + \
++                 dma_cntrl_nodes
++
++    topology = create_topology(all_cntrls, options)
++
++    return (cpu_sequencers, dir_cntrl_nodes, topology)
++
++
+ def create_system(options, system, piobus, dma_ports, ruby_system):
+     
+     if buildEnv['PROTOCOL'] != 'MOESI_CMP_token':
+diff -r c1b28ea22ff8 configs/ruby/Ruby.py
+--- a/configs/ruby/Ruby.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/configs/ruby/Ruby.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -98,6 +98,18 @@
+     topology = eval("Topo.%s(controllers)" % options.topology)
+     return topology
+ 
++def create_vtopology(controllers, options):
++    """ Called from create_system in configs/ruby/<protocol>.py
++        Must return an object which is a subclass of BaseTopology
++        found in configs/topologies/BaseTopology.py
++        This is a wrapper for the legacy topologies.
++    """
++    exec "import %s as Topo" % options.topology
++    topology = eval("Topo.%s(controllers)" % options.topology)
++    return topology
++
++
++
+ def create_system(options, system, piobus = None, dma_ports = []):
+ 
+     system.ruby = RubySystem(stats_filename = options.ruby_stats,
+@@ -193,3 +205,103 @@
+     ruby.mem_size = total_mem_size
+     ruby._cpu_ruby_ports = cpu_sequencers
+     ruby.random_seed    = options.random_seed
++
++
++def create_vsystem(options, systems, total_num_cpus, total_mem_size, vm_cpus, vm_mems, vmm_cpu_matrix):
++    #we assign ruby to the first vm
++    systems[0].ruby = RubySystem(stats_filename = options.ruby_stats,
++                             no_mem_vec = options.use_map)
++    ruby = systems[0].ruby
++
++    protocol = buildEnv['PROTOCOL']
++    exec "import %s" % protocol
++    try:
++        (cpu_sequencers, dir_cntrls, topology) = \
++             eval("%s.create_vsystem(options, systems, ruby, total_num_cpus, total_mem_size, vm_cpus, vm_mems)"
++                  % protocol)
++    except:
++        print "Error: could not create sytem for ruby protocol %s" % protocol
++        raise
++
++    start_address = MemorySize("0B")
++    for (j, vm) in enumerate(systems):
++       sys_port_proxy = RubyPortProxy(ruby_system = ruby, virtualization_support = True, real_address_range = AddrRange(start_address,start_address.value+MemorySize(vm_mems[j]).value))
++       # Give the system port proxy a SimObject parent without creating a
++       # full-fledged controller
++       vm.sys_port_proxy = sys_port_proxy
++       vm.sys_port_proxy.version = j
++
++       # Connect the system port for loading of binaries etc
++       vm.system_port = vm.sys_port_proxy.slave
++       start_address.value = start_address.value + MemorySize(vm_mems[j]).value
++
++
++    #
++    # Set the network classes based on the command line options
++    #
++    if options.garnet_network == "fixed":
++        class NetworkClass(GarnetNetwork_d): pass
++        class IntLinkClass(GarnetIntLink_d): pass
++        class ExtLinkClass(GarnetExtLink_d): pass
++        class RouterClass(GarnetRouter_d): pass
++    elif options.garnet_network == "flexible":
++        class NetworkClass(GarnetNetwork): pass
++        class IntLinkClass(GarnetIntLink): pass
++        class ExtLinkClass(GarnetExtLink): pass
++        class RouterClass(GarnetRouter): pass
++    else:
++        class NetworkClass(SimpleNetwork): pass
++        class IntLinkClass(SimpleIntLink): pass
++        class ExtLinkClass(SimpleExtLink): pass
++        class RouterClass(Switch): pass
++
++
++    # Create the network topology
++    network = NetworkClass(ruby_system = ruby, topology = topology.description,
++                           routers = [], ext_links = [], int_links = [])
++    topology.makevTopology(options, network, IntLinkClass, ExtLinkClass,
++                          RouterClass, vmm_cpu_matrix)
++
++    if options.network_fault_model:
++        assert(options.garnet_network == "fixed")
++        network.enable_fault_model = True
++        network.fault_model = FaultModel()
++
++    #
++    # Loop through the directory controlers.
++    # Determine the total memory size of the ruby system and verify it is equal
++    # to physmem.  However, if Ruby memory is using sparse memory in SE
++    # mode, then the system should not back-up the memory state with
++    # the Memory Vector and thus the memory size bytes should stay at 0.
++    # Also set the numa bits to the appropriate values.
++    #
++    ruby_total_mem_size = MemorySize('0B')
++
++    dir_bits = int(math.log(options.num_dirs, 2))
++    ruby.block_size_bytes = options.cacheline_size
++    block_size_bits = int(math.log(options.cacheline_size, 2))
++
++    if options.numa_high_bit:
++        numa_bit = options.numa_high_bit
++    else:
++        # if the numa_bit is not specified, set the directory bits as the
++        # lowest bits above the block offset bits, and the numa_bit as the
++        # highest of those directory bits
++        numa_bit = block_size_bits + dir_bits - 1
++
++    for dir_cntrl in dir_cntrls:
++        # I do not remember why I have commented the bellow line out!
++        #ruby_total_mem_size.value += dir_cntrl.directory.size.value
++        dir_cntrl.directory.numa_high_bit = numa_bit
++
++    #phys_mem_size = sum(map(lambda r: r.size(), system.mem_ranges))
++    #assert(total_mem_size.value == phys_mem_size)
++
++    ruby_profiler = RubyProfiler(ruby_system = ruby,
++                                 num_of_sequencers = len(cpu_sequencers))
++    ruby.network = network
++    ruby.profiler = ruby_profiler
++    ruby.mem_size = total_mem_size
++    ruby._cpu_ruby_ports = cpu_sequencers
++    ruby.random_seed    = options.random_seed
++    return ruby
+diff -r c1b28ea22ff8 configs/topologies/Mesh.py
+--- a/configs/topologies/Mesh.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/configs/topologies/Mesh.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -39,6 +39,101 @@
+ 
+     # Makes a generic mesh assuming an equal number of cache and directory cntrls
+ 
++    def makevTopology(self, options, network, IntLink, ExtLink, Router, vmm_cpu_matrix):
++        nodes = self.nodes
++
++        num_routers = len(vmm_cpu_matrix[0])
++        num_rows = options.mesh_rows
++
++        total_vcpu = 0
++        for i in xrange(len(vmm_cpu_matrix)):
++            for j in xrange(len(vmm_cpu_matrix[i])):
++                 if float(vmm_cpu_matrix[i][j]) > 0:
++                     total_vcpu += 1
++
++        # There must be an evenly divisible number of cntrls to routers
++        # Also, obviously the number or rows must be <= the number of routers
++        cntrls_per_router, remainder = divmod(len(nodes), num_routers)
++        assert(num_rows <= num_routers)
++        num_columns = int(num_routers / num_rows)
++        assert(num_columns * num_rows == num_routers)
++
++        # Create the routers in the mesh
++        routers = [Router(router_id=i) for i in range(num_routers)]
++        network.routers = routers
++
++        # link counter to set unique link ids
++        link_count = 0
++
++        # Add all but the remainder nodes to the list of nodes to be uniformly
++        # distributed across the network.
++        network_nodes = []
++        remainder_nodes = []
++        
++        node_index = 0
++        for i in xrange(len(vmm_cpu_matrix[0])):
++            network_nodes.append([])
++            for j in xrange(len(vmm_cpu_matrix)):
++                 if(float(vmm_cpu_matrix[j][i]) > 0):
++                      network_nodes[i].append(nodes[node_index])
++                      node_index += 1
++
++        for i in xrange( len(nodes) - node_index ):
++            if node_index < (len(nodes) - remainder):
++                 network_nodes.append([])
++                 network_nodes[len(network_nodes)-1].append(nodes[node_index])
++            else:
++                 remainder_nodes.append(nodes[node_index])
++            node_index += 1
++
++        # Connect each node to the appropriate router
++        ext_links = []
++        for (i, node_array) in enumerate(network_nodes):
++            cntrl_level, router_id = divmod(i, num_routers)
++            assert(cntrl_level < cntrls_per_router)
++            for (j, node) in enumerate(node_array):
++                 ext_links.append(ExtLink(link_id=link_count, ext_node=node,
++                                     int_node=routers[router_id]))
++            link_count += 1
++
++        # Connect the remainding nodes to router 0.  These should only be
++        # DMA nodes.
++        for (i, node) in enumerate(remainder_nodes):
++            #assert(node.type == 'DMA_Controller')
++            assert(i < remainder)
++            ext_links.append(ExtLink(link_id=link_count, ext_node=node,
++                                    int_node=routers[0]))
++            link_count += 1
++
++        network.ext_links = ext_links
++
++        # Create the mesh links.  First row (east-west) links then column
++        # (north-south) links
++        int_links = []
++        for row in xrange(num_rows):
++            for col in xrange(num_columns):
++                if (col + 1 < num_columns):
++                    east_id = col + (row * num_columns)
++                    west_id = (col + 1) + (row * num_columns)
++                    int_links.append(IntLink(link_id=link_count,
++                                            node_a=routers[east_id],
++                                            node_b=routers[west_id],
++                                            weight=1))
++                    link_count += 1
++
++        for col in xrange(num_columns):
++            for row in xrange(num_rows):
++                if (row + 1 < num_rows):
++                    north_id = col + (row * num_columns)
++                    south_id = col + ((row + 1) * num_columns)
++                    int_links.append(IntLink(link_id=link_count,
++                                            node_a=routers[north_id],
++                                            node_b=routers[south_id],
++                                            weight=2))
++                    link_count += 1
++
++        network.int_links = int_links
++
+     def makeTopology(self, options, network, IntLink, ExtLink, Router):
+         nodes = self.nodes
+ 
+diff -r c1b28ea22ff8 src/mem/ruby/system/RubyPort.cc
+--- a/src/mem/ruby/system/RubyPort.cc	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/mem/ruby/system/RubyPort.cc	Tue Sep 24 18:54:56 2013 +0400
+@@ -54,6 +54,9 @@
+       pio_port(csprintf("%s-pio-port", name()), this),
+       m_usingRubyTester(p->using_ruby_tester), m_request_cnt(0),
+       drainManager(NULL), ruby_system(p->ruby_system), system(p->system),
++	// <vgem5>
++	virtualization_support(p->virtualization_support), real_address_range(p->real_address_range),
++	// </vgem5>
+       waitingOnSequencer(false), access_phys_mem(p->access_phys_mem)
+ {
+     assert(m_version != -1);
+@@ -244,10 +247,14 @@
+     bool needsResponse = pkt->needsResponse();
+ 
+     // Do the functional access on ruby memory
++	// <vgem5> 
++	Address realAddress(ruby_port->translatePhysToReal(pkt->getAddr()));
++	// </vgem5> 
++
+     if (pkt->isRead()) {
+-        accessSucceeded = ruby_system->functionalRead(pkt);
++        accessSucceeded = ruby_system->functionalRead(pkt, realAddress); // vgem5
+     } else if (pkt->isWrite()) {
+-        accessSucceeded = ruby_system->functionalWrite(pkt);
++        accessSucceeded = ruby_system->functionalWrite(pkt, realAddress); // vgem5
+     } else {
+         panic("RubyPort: unsupported functional command %s\n",
+               pkt->cmdString());
+diff -r c1b28ea22ff8 src/mem/ruby/system/RubyPort.hh
+--- a/src/mem/ruby/system/RubyPort.hh	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/mem/ruby/system/RubyPort.hh	Tue Sep 24 18:54:56 2013 +0400
+@@ -176,6 +176,37 @@
+     RubySystem* ruby_system;
+     System* system;
+ 
++	// <vgem5>
++        bool virtualization_support;
++        AddrRange real_address_range;
++
++public:
++        Addr translatePhysToReal(Addr phys)
++        {
++                if(virtualization_support)
++                {
++                        //printf("XXX translating %d, start %d end %d", (int)phys, (int)real_address_range.start, (int)real_address_range.end);
++                        assert(phys <= real_address_range.size());
++                        return ruby_system->mapRealAddressToMemory(phys + real_address_range.start());
++                }
++                return phys;
++        }
++
++        Addr translateRealToPhys(Addr real)
++        {
++                if(virtualization_support)
++                {
++                        real = ruby_system->mapMemoryToRealAddress(real);
++                        assert(real < real_address_range.end);
++                        assert(real >= real_address_range.start);
++                        return real - real_address_range.start();
++                }
++                return real;
++        }
++private:
++        // </vgem5>  
++
++
+     //
+     // Based on similar code in the M5 bus.  Stores pointers to those ports
+     // that should be called when the Sequencer becomes available after a stall.
+diff -r c1b28ea22ff8 src/mem/ruby/system/Sequencer.py
+--- a/src/mem/ruby/system/Sequencer.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/mem/ruby/system/Sequencer.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -45,6 +45,8 @@
+         "should the rubyport atomically update phys_mem")
+     ruby_system = Param.RubySystem("")
+     system = Param.System(Parent.any, "system object")
++    virtualization_support = Param.Bool(False, "should we translate phys mem to real mem addresses?")
++    real_address_range = Param.AddrRange(AllMemory, "real memory address range")
+     support_data_reqs = Param.Bool(True, "data cache requests supported")
+     support_inst_reqs = Param.Bool(True, "inst cache requests supported")
+ 
+diff -r c1b28ea22ff8 src/mem/ruby/system/System.cc
+--- a/src/mem/ruby/system/System.cc	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/mem/ruby/system/System.cc	Tue Sep 24 18:54:56 2013 +0400
+@@ -51,6 +51,12 @@
+ uint64_t RubySystem::m_memory_size_bytes;
+ uint32_t RubySystem::m_memory_size_bits;
+ 
++// <vgem5>
++int64* RubySystem::mappedRealToMemory;
++int64* RubySystem::mappedMemoryToReal;
++int64  RubySystem::lastMappedMemory;
++// </vgem5>
++
+ RubySystem::RubySystem(const Params *p)
+     : ClockedObject(p)
+ {
+@@ -91,6 +97,18 @@
+ 
+     // Resize to the size of different machine types
+     g_abs_controls.resize(MachineType_NUM);
++	// <vgem5>
++        assert(p->mem_size % HYPERVISOR_PAGE_SIZE == 0);
++        printf("gowing to new\n");
++        mappedRealToMemory = new int64[(p->mem_size) >> HYPERVISOR_PAGE_LOW_ORDER_BITS];
++        mappedMemoryToReal = new int64[(p->mem_size) >> HYPERVISOR_PAGE_LOW_ORDER_BITS];
++        for(int64 i=0; i<((p->mem_size) >> HYPERVISOR_PAGE_LOW_ORDER_BITS); i++)
++        {
++                mappedRealToMemory[i] = -1;
++                mappedMemoryToReal[i] = -1;
++        }
++        lastMappedMemory = 0;
++	// </vgem5>
+ }
+ 
+ void
+@@ -127,6 +145,11 @@
+ 
+ RubySystem::~RubySystem()
+ {
++	// <vgem5>
++        delete mappedMemoryToReal;
++        delete mappedRealToMemory;
++	// </vgem5>
++
+     delete m_network_ptr;
+     delete m_profiler_ptr;
+     if (m_mem_vec_ptr)
+@@ -416,9 +439,11 @@
+ }
+ 
+ bool
+-RubySystem::functionalRead(PacketPtr pkt)
++RubySystem::functionalRead(PacketPtr pkt, Address realAddress)
+ {
+-    Address address(pkt->getAddr());
++	// <vgem5>
++    Address address(realAddress);
++	// </vgem5>
+     Address line_address(address);
+     line_address.makeLineAddress();
+ 
+@@ -519,9 +544,9 @@
+ // and writes the data portion of those that hold the address specified
+ // in the packet.
+ bool
+-RubySystem::functionalWrite(PacketPtr pkt)
++RubySystem::functionalWrite(PacketPtr pkt, Address realAddress)
+ {
+-    Address addr(pkt->getAddr());
++    Address addr(realAddress);
+     Address line_addr = line_address(addr);
+     AccessPermission access_perm = AccessPermission_NotPresent;
+     int num_controllers = m_abs_cntrl_vec.size();
+diff -r c1b28ea22ff8 src/mem/ruby/system/System.hh
+--- a/src/mem/ruby/system/System.hh	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/mem/ruby/system/System.hh	Tue Sep 24 18:54:56 2013 +0400
+@@ -50,6 +50,11 @@
+ class Profiler;
+ class MemoryControl;
+ 
++// <vgem5>
++#define HYPERVISOR_PAGE_SIZE 4*1024 //4KB as in linux
++#define HYPERVISOR_PAGE_LOW_ORDER_BITS 12 //2^12 = 4K 
++// </vgem5>
++
+ class RubySystem : public ClockedObject
+ {
+   public:
+@@ -110,8 +115,8 @@
+     void unserialize(Checkpoint *cp, const std::string &section);
+     void process();
+     void startup();
+-    bool functionalRead(Packet *ptr);
+-    bool functionalWrite(Packet *ptr);
++    bool functionalRead(Packet *ptr, Address realAddress);
++    bool functionalWrite(Packet *ptr, Address realAddress);
+ 
+     void registerNetwork(Network*);
+     void registerProfiler(Profiler*);
+@@ -146,6 +151,12 @@
+     static uint64_t m_memory_size_bytes;
+     static uint32_t m_memory_size_bits;
+ 
++        // <vgem5>
++        static int64* mappedRealToMemory;
++        static int64* mappedMemoryToReal;
++        static int64  lastMappedMemory;
++	// </vgem5>
++
+     Network* m_network_ptr;
+     std::vector<MemoryControl *> m_memory_controller_vec;
+     std::vector<AbstractController *> m_abs_cntrl_vec;
+@@ -157,6 +168,24 @@
+     bool m_cooldown_enabled;
+     CacheRecorder* m_cache_recorder;
+     std::vector<SparseMemory*> m_sparse_memory_vector;
++	Addr mapRealAddressToMemory(Addr realAddress)
++        {
++                //printf("we are in and last mapped memory is %d\n", (int)lastMappedMemory);
++                if(mappedRealToMemory[realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] == -1)
++                {
++                        mappedRealToMemory[realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] = lastMappedMemory;
++                        mappedMemoryToReal[lastMappedMemory] = realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS;
++                        lastMappedMemory++;
++                        //printf("XXX %d, mapped to %d\n", (int)(realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS), (int)lastMappedMemory);
++                }
++                return Addr((mappedRealToMemory[realAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] << HYPERVISOR_PAGE_LOW_ORDER_BITS) | (realAddress & (HYPERVISOR_PAGE_SIZE-1) ));
++        }
++        Addr mapMemoryToRealAddress(Addr memoryAddress)
++        {
++                assert(memoryAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS < lastMappedMemory);
++                return Addr((mappedMemoryToReal[memoryAddress >> HYPERVISOR_PAGE_LOW_ORDER_BITS] << HYPERVISOR_PAGE_LOW_ORDER_BITS) | (memoryAddress & (HYPERVISOR_PAGE_SIZE-1) ));
++        }
++
+ };
+ 
+ inline std::ostream&
+diff -r c1b28ea22ff8 src/python/m5/SimObject.py
+--- a/src/python/m5/SimObject.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/python/m5/SimObject.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -917,6 +917,10 @@
+                 port.unproxy(self)
+ 
+     def print_ini(self, ini_file):
++        # <vgem5>
++        if instanceDict.has_key(self.path()):
++            return
++        # </vgem5>
+         print >>ini_file, '[' + self.path() + ']'       # .ini section header
+ 
+         instanceDict[self.path()] = self
+diff -r c1b28ea22ff8 src/sim/ClockedObject.py
+--- a/src/sim/ClockedObject.py	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/sim/ClockedObject.py	Tue Sep 24 18:54:56 2013 +0400
+@@ -47,3 +47,9 @@
+     # The clock domain this clocked object belongs to, inheriting the
+     # parent's clock domain by default
+     clk_domain = Param.ClockDomain(Parent.clk_domain, "Clock domain")
++    # <vgem5>
++    periodic_schedule = Param.Bool(False, "if this should be periodicly scheduled. vCPU?")
++    periodic_schedule_hyperperiod = Param.Tick(10000, "")
++    periodic_schedule_start_tick = Param.Tick(0, "when should this clocked object (vcpu) start processing")
++    periodic_schedule_stop_tick = Param.Tick(10000, "when should this clocked object (vcpu) stop processing and schedule next event in next start")
++    # </vgem5>
+diff -r c1b28ea22ff8 src/sim/clocked_object.hh
+--- a/src/sim/clocked_object.hh	Sun Sep 15 13:45:59 2013 -0500
++++ b/src/sim/clocked_object.hh	Tue Sep 24 18:54:56 2013 +0400
+@@ -111,12 +111,25 @@
+ 
+   protected:
+ 
++	//<vgem5>
++	//the bellow params are used in vCPU support.
++	//they can be used later for other clockedObjects if needed.
++	bool periodicSchedule;
++	Tick periodicScheduleHyperperiod;
++	Tick periodicScheduleStartTick;
++	Tick periodicScheduleStopTick;
++	//</vgem5>
++
+     /**
+      * Create a clocked object and set the clock domain based on the
+      * parameters.
+      */
+     ClockedObject(const ClockedObjectParams* p) :
+-        SimObject(p), tick(0), cycle(0), clockDomain(*p->clk_domain)
++        SimObject(p), tick(0), cycle(0), clockDomain(*p->clk_domain),
++	periodicSchedule(p->periodic_schedule),
++        periodicScheduleHyperperiod(p->periodic_schedule_hyperperiod),
++        periodicScheduleStartTick(p->periodic_schedule_start_tick),
++        periodicScheduleStopTick(p->periodic_schedule_stop_tick)
+     {
+     }
+ 
+@@ -136,6 +149,43 @@
+         cycle = elapsedCycles;
+         tick = elapsedCycles * clockPeriod();
+     }
++        /**
++         *  in case we are vcpu (i.e. we are using periodic schedule), this funcion 
++         * computes the next cycle in which we should schedule next event.
++         *
++         * start <= next_tick <= stop    ----> do nothing
++         * else                          ----> move next_tick to next start.
++         */
++
++	Tick jumpIfNotInWorkingRegion() const
++        {
++		Tick next_tick = tick;
++		if(!periodicSchedule)
++			return next_tick;
++		if((next_tick % periodicScheduleHyperperiod) >= periodicScheduleStartTick)
++		{
++                        if((next_tick % periodicScheduleHyperperiod) <= periodicScheduleStopTick)
++                        {
++                                //we are in working region
++                                //so we should not jump!
++                                return next_tick;
++                        }
++                        else
++                        {
++                                //printf("next_tick: %d vcpuStartTick %d\n", (int)next_tick, (int)vcpuStartTick);
++                                //printf("(next_tick mod vcpuHyperperiod): %d\n", (int)((next_tick % vcpuHyperperiod)));
++                                //printf("%d 1-> %d\n", (int)next_tick, (int)(next_tick + vcpuHyperperiod - vcpuStopTick + vcpuStartTick));
++                                return next_tick + periodicScheduleHyperperiod - periodicScheduleStopTick + periodicScheduleStartTick;
++                                //return nextCycle(next_tick + (vcpuHyperperiod - next_tick % vcpuHyperperiod) + vcpuStartTick, false);
++                        }
++                }
++                else
++                {
++                        //printf("%d 2-> %d\n", (int)next_tick, (int)(next_tick + (vcpuStartTick - next_tick % vcpuHyperperiod)));
++                        return next_tick + (periodicScheduleStartTick - next_tick % periodicScheduleHyperperiod);
++                }
++        }
++
+ 
+   public:
+ 
+@@ -179,7 +229,14 @@
+      * @return The tick when the next cycle starts
+      */
+     Tick nextCycle() const
+-    { return clockEdge(Cycles(1)); }
++    { 
++	//<vgem5>
++	if(periodicSchedule)
++		return clockEdge(Cycles(1)) + jumpIfNotInWorkingRegion(); //currently used by vCPU only
++	else
++	//</vgem5>
++		return clockEdge(Cycles(1)); 
++    }
+ 
+     inline uint64_t frequency() const
+     {

@@ -20,6 +20,10 @@ An script called hypervisor.py is added to configs/example.
 You may use it like other gem5's configuration scripts.
 Description of the arguments are given in "hypervisor.py -h".
 
+## Modifications
+
+To know the modified parts, take a look at gem5v-diffs directory.
+
 ## Contact
 
 If you have any question about this project, please don't hesitate to contact me: nikoonia at sign ut dot ac dot ir
